@@ -1,5 +1,8 @@
 #include "first_vulkan_app.h"
 #include "simple_render_system.h"
+#include "vulk_camera.h"
+#include "kb_movement_controller.h"
+#include "vulk_buffer.h"
 
 //libs
 #define GLM_FORCE_RADIANS
@@ -8,33 +11,106 @@
 #include <glm/gtc/constants.hpp>
 
 //std
-#include <stdexcept>
 #include <array>
+#include <chrono> //implement timing
 #include <cassert>
 #include <iostream>
 
 namespace vWind {
 
-    FirstApp::FirstApp() { loadGameObjects(); }
+    struct GlobalUbo {
+         glm::mat4 projectionView{ 1.f };
+         glm::vec4 ambientLightColor{ 1.f, 1.f, 1.f, .02f };  // w is intensity
+         glm::vec3 lightPosition{ -1.f };
+         
+         alignas(16) glm::vec4 lightColor{ 1.f };  // w is light intensity
+         
+        //alignas(16) glm::vec3 pointLight;
+    };
 
-    FirstApp::~FirstApp() {}
+    FirstApp::FirstApp() 
+    { 
+        globalPool = VulkDescriptorPool::Builder(vulkDevice)
+            .setMaxSets(VulkSwapChain::MAX_FRAMES_IN_FLIGHT)
+            .addPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VulkSwapChain::MAX_FRAMES_IN_FLIGHT)
+            .build();
+
+        loadGameObjects(); 
+    }
+
+    FirstApp::~FirstApp() { }
 
     void FirstApp::run() {
-        SimpleRenderSystem simpleRenderSystem{ vulkDevice, vulkRenderer.getSCRenderPass() };
 
-        while (!vulkWindow.shouldClose())
-        {
+        std::vector<std::unique_ptr<VulkBuffer>> uboBuffers(VulkSwapChain::MAX_FRAMES_IN_FLIGHT);
+        for (int i = 0; i < uboBuffers.size(); i++) {
+            uboBuffers[i] = std::make_unique<VulkBuffer>(
+                vulkDevice,
+                sizeof(GlobalUbo),
+                1,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);//| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+            uboBuffers[i]->map();
+        }
+
+        auto globalSetLayout = VulkDescriptorSetLayout::Builder(vulkDevice)
+            .addBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
+            .build();
+
+        std::vector<VkDescriptorSet> globalDescriptorSets(VulkSwapChain::MAX_FRAMES_IN_FLIGHT);
+        for (int i = 0; i < globalDescriptorSets.size(); i++) {
+            auto bufferInfo = uboBuffers[i]->descriptorInfo();
+            VulkDescriptorWriter(*globalSetLayout,*globalPool)
+                .writeBuffer(0, &bufferInfo)
+                .build(globalDescriptorSets[i]);
+        }
+
+        SimpleRenderSystem simpleRenderSystem
+        {   
+            vulkDevice, 
+            vulkRenderer.getSCRenderPass(), 
+            globalSetLayout->getDescriptorSetLayout()
+        };
+        VulkCamera camera{};
+
+        auto viewerObject = VulkGameObj::createGameObject();
+        viewerObject.transform.translation.z = -2.5f;
+        KeyboardMovementController cameraController{};
+        
+        auto currentTime = std::chrono::high_resolution_clock::now();
+
+        while (!vulkWindow.shouldClose()){
             glfwPollEvents();
+
+            //calc deltatime
+            auto newTime = std::chrono::high_resolution_clock::now();
+            float deltaTime = std::chrono::duration<float, std::chrono::seconds::period>(newTime - currentTime).count();
+            currentTime = newTime;
+            
+            cameraController.moveInPlaneXZ(vulkWindow.getGLFWwindow(), deltaTime, viewerObject);
+            camera.setViewYXZ(viewerObject.transform.translation, viewerObject.transform.rotation);
+            float aspect = vulkRenderer.getAspectRatio();
+            camera.setPerspectiveProjection(glm::radians(50.f), aspect, 0.1f, 100.f);
+
+           
             if (auto commandBuffer = vulkRenderer.beginFrame()) {
+                int frameIndex = vulkRenderer.getFrameIndex();
+                FrameInfo frameInfo
+                { 
+                    frameIndex, deltaTime, 
+                    commandBuffer, camera, 
+                    globalDescriptorSets[frameIndex]
+                };
 
-                /// <summary>
-                /// Begin offscreen shadow pass
-                /// render shadow casting objects
-                /// end off
-                /// </summary>
-
+                //update
+                GlobalUbo ubo{};
+                ubo.projectionView = camera.getProjection() * camera.getView();
+                uboBuffers[frameIndex]->writeToIndex(&ubo, frameIndex);
+                uboBuffers[frameIndex]->flush();
+               
+                ///render
                 vulkRenderer.beginSCRenderPass(commandBuffer);
-                simpleRenderSystem.renderGameObjects(commandBuffer, gameObjects);
+                simpleRenderSystem.renderGameObjects(frameInfo, gameObjects);
                 vulkRenderer.endSCRenderPass(commandBuffer);
                 vulkRenderer.endFrame();
             }
@@ -42,98 +118,33 @@ namespace vWind {
         }
         vkDeviceWaitIdle(vulkDevice.device());
     }
-    /*
-    void FirstApp::sierpinski(
-        std::vector<VulkModel::Vertex>& vertices,
-        int depth,
-        glm::vec2 left,
-        glm::vec2 right,
-        glm::vec2 top) {
-        if (depth <= 0) {
-            vertices.push_back({ top });
-            vertices.push_back({ right });
-            vertices.push_back({ left });
-        }
-        else {
-            auto leftTop = 0.5f * (left + top);
-            auto rightTop = 0.5f * (right + top);
-            auto leftRight = 0.5f * (left + right);
-            sierpinski(vertices, depth - 1, left, leftRight, leftTop);
-            sierpinski(vertices, depth - 1, leftRight, right, rightTop);
-            sierpinski(vertices, depth - 1, leftTop, rightTop, top);
-        }
-    }
-
-    //sierpinski(vertices, 3, { -0.5f, 0.5f }, { 0.5f, 0.5f }, { 0.0f, -0.5f });
-
-    */
-    std::unique_ptr<VulkModel> createCubeModel(VulkDevice& device, glm::vec3 offset) {
-        std::vector<VulkModel::Vertex> vertices{
-
-            // left face (white)
-            {{-.5f, -.5f, -.5f}, {.9f, .9f, .9f}},
-            {{-.5f, .5f, .5f}, {.9f, .9f, .9f}},
-            {{-.5f, -.5f, .5f}, {.9f, .9f, .9f}},
-            {{-.5f, -.5f, -.5f}, {.9f, .9f, .9f}},
-            {{-.5f, .5f, -.5f}, {.9f, .9f, .9f}},
-            {{-.5f, .5f, .5f}, {.9f, .9f, .9f}},
-
-            // right face (yellow)
-            {{.5f, -.5f, -.5f}, {.8f, .8f, .1f}},
-            {{.5f, .5f, .5f}, {.8f, .8f, .1f}},
-            {{.5f, -.5f, .5f}, {.8f, .8f, .1f}},
-            {{.5f, -.5f, -.5f}, {.8f, .8f, .1f}},
-            {{.5f, .5f, -.5f}, {.8f, .8f, .1f}},
-            {{.5f, .5f, .5f}, {.8f, .8f, .1f}},
-
-            // top face (purple, remember y axis points down)
-            {{-.5f, -.5f, -.5f}, {.9f, .0f, .8f}},
-            {{.5f, -.5f, .5f}, {.9f, .0f, .8f}},
-            {{-.5f, -.5f, .5f}, {.9f, .0f, .8f}},
-            {{-.5f, -.5f, -.5f}, {.9f, .0f, .8f}},
-            {{.5f, -.5f, -.5f}, {.9f, .0f, .8f}},
-            {{.5f, -.5f, .5f}, {.9f, .0f, .8f}},
-
-            // bottom face (red)
-            {{-.5f, .5f, -.5f}, {.9f, .0f, .0f}},
-            {{.5f, .5f, .5f}, {.9f, .0f, .0f}},
-            {{-.5f, .5f, .5f}, {.9f, .0f, .0f}},
-            {{-.5f, .5f, -.5f}, {.9f, .0f, .0f}},
-            {{.5f, .5f, -.5f}, {.9f, .0f, .0f}},
-            {{.5f, .5f, .5f}, {.9f, .0f, .0f}},
-
-            // nose face (blue)
-            {{-.5f, -.5f, 0.5f}, {.0f, .1f, .9f}},
-            {{.5f, .5f, 0.5f}, {.0f, .1f, .9f}},
-            {{-.5f, .5f, 0.5f}, {.0f, .1f, .9f}},
-            {{-.5f, -.5f, 0.5f}, {.0f, .1f, .9f}},
-            {{.5f, -.5f, 0.5f}, {.0f, .1f, .9f}},
-            {{.5f, .5f, 0.5f}, {.0f, .1f, .9f}},
-
-            // tail face (green)
-            {{-.5f, -.5f, -0.5f}, {.1f, .9f, .1f}},
-            {{.5f, .5f, -0.5f}, {.1f, .9f, .1f}},
-            {{-.5f, .5f, -0.5f}, {.1f, .9f, .1f}},
-            {{-.5f, -.5f, -0.5f}, {.1f, .9f, .1f}},
-            {{.5f, -.5f, -0.5f}, {.1f, .9f, .1f}},
-            {{.5f, .5f, -0.5f}, {.1f, .9f, .1f}},
-
-        };
-        for (auto& v : vertices) {
-            v.position += offset;
-        }
-        return std::make_unique<VulkModel>(device, vertices);
-    }
-
+    
     void FirstApp::loadGameObjects() {
-        std::shared_ptr<VulkModel> vulkModel = createCubeModel(vulkDevice, { .0f, .0f, .0f });
+        std::shared_ptr<VulkModel> vulkModel = 
+            VulkModel::createModelFromFile(vulkDevice, "models/donut.obj");
+        auto gameObj = VulkGameObj::createGameObject();
+        gameObj.model = vulkModel;
+        gameObj.transform.translation = { -1.0f,  .5f ,.0f };
+        gameObj.transform.scale = glm::vec3 { 3.f };
+        gameObjects.push_back(std::move(gameObj));
 
-        auto cube = VulkGameObj::createGameObject();
-        cube.model = vulkModel;
-        cube.transform.translation = { .0f,  .0f , .5f };
-        cube.transform.scale = { .5f,  .5f , .5f };
-        gameObjects.push_back(std::move(cube));
+        vulkModel =
+            VulkModel::createModelFromFile(vulkDevice, "models/smooth_vase.obj");
+        auto VaseObj = VulkGameObj::createGameObject();
+        VaseObj.model = vulkModel;
+        VaseObj.transform.translation = { 1.0f,  .5f , .0f };
+        VaseObj.transform.scale = glm::vec3{ 3.f };
+        gameObjects.push_back(std::move(VaseObj));
+
+        vulkModel =
+            VulkModel::createModelFromFile(vulkDevice, "models/quad.obj");
+        auto ground = VulkGameObj::createGameObject();
+        ground.model = vulkModel;
+        ground.transform.translation = { .0f,  .65f , .0f };
+        ground.transform.scale = glm::vec3{ 3.f, 1.f, 3.f };
+        gameObjects.push_back(std::move(ground));
+
+       
     }
-
 
 }//endof namespace vWind

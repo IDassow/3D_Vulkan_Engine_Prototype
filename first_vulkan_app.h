@@ -5,6 +5,7 @@
 #include "vulk_device.h"
 #include "vulk_renderer.h"
 #include "vulk_game_object.h"
+#include "vulk_descriptors.h"
 
 
 
@@ -35,6 +36,8 @@ namespace vWind {
 		VulkDevice vulkDevice{ vulkWindow };
 		VulkRenderer vulkRenderer{ vulkWindow, vulkDevice };
 		
+		//NOTE: order of declarations matters
+		std::unique_ptr<VulkDescriptorPool> globalPool{};
 		std::vector<VulkGameObj> gameObjects;
 	};
 }//endof namespace vWind

@@ -24,6 +24,7 @@ namespace vWind {
 
 		bool isFrameInProgress() const { return isFrameStarted; }
 		VkRenderPass getSCRenderPass() const { return vulkSwapChain->getRenderPass(); }
+		float getAspectRatio() const { return vulkSwapChain->extentAspectRatio(); }
 		VkCommandBuffer getCurrentCB() const {
 			assert(isFrameStarted && "Cannot get command Buffer when frame is not in progress");
 			return commandBuffers[currentFrameIndex];
